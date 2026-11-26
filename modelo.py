@@ -379,7 +379,6 @@ def executar_pdde(
         "n_pl_simulacao": len(resultados),
         "tempo_treino_s": tempo_treino,
         "tempo_simulacao_s": tempo_sim,
-        "o + tempo_sim,
         "custo_medio_total": float(
             simulacao.groupby("simulacao")["custo_estagio"].sum().mean()
         ),
