@@ -1,4 +1,6 @@
+import io
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,8 +10,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+
 st.set_page_config(
-    page_title="1dtoy | PDDE UFJF e Cobre",
+    page_title="1dtoy | PDDE UFJF e COBRE",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -21,22 +24,26 @@ st.markdown(
     .stApp, [data-testid="stAppViewContainer"],
     [data-testid="stHeader"], [data-testid="stSidebar"],
     [data-testid="stSidebarContent"], [data-testid="stToolbar"],
-    [data-testid="stFileUploaderDropzone"], [data-testid="stAlert"],
+    [data-testid="stForm"], [data-testid="stMetric"],
+    [data-testid="stFileUploader"], [data-testid="stFileUploaderDropzone"],
+    [data-testid="stFileUploaderFile"], [data-testid="stFileUploaderFileIcon"],
+    [data-testid="stAlert"], [data-testid="stAlert"] *,
+    [data-testid="stNotification"], [data-testid="stNotification"] *,
     [data-testid="stExpander"] details, [data-testid="stExpander"] summary,
-    [data-testid="stCode"], pre, code, input, textarea, select,
-    [data-baseweb="input"], [data-baseweb="base-input"],
-    [data-baseweb="select"] > div, [data-baseweb="popover"] > div,
-    [role="listbox"], [role="option"], [role="menu"],
-    .stApp button {
+    input, textarea, select, [data-baseweb="input"],
+    [data-baseweb="base-input"], [data-baseweb="select"] > div,
+    [data-baseweb="popover"] > div, [role="option"], .stApp button {
         background-color: #ffffff !important;
         color: #000000 !important;
     }
     .stApp p, .stApp label, .stApp h1, .stApp h2, .stApp h3,
-    .stApp li, [data-testid="stMetricValue"],
-    [data-testid="stMetricLabel"], [data-testid="stCaptionContainer"] {
+    .stApp small, .stApp li, [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"], [data-testid="stFileUploaderFile"] * {
         color: #000000 !important;
     }
-    .stApp button { border-color: #c4cbd2; }
+    [data-testid="stAlert"], [data-testid="stNotification"] {
+        border: 1px solid #b8c2cc !important;
+    }
     .stApp button:hover, [role="option"]:hover {
         background-color: #eef5fc !important;
     }
@@ -52,9 +59,7 @@ RAIZ = Path(__file__).resolve().parent
 COBRE = shutil.which("cobre")
 CORES = ["#1662a5", "#c65f20", "#358353", "#a54277"]
 
-# Arquivos do 1dtoy usados pela linha de comando do Cobre.
-# O modelo Python continua lendo seus CSVs normalmente.
-ARQUIVOS_COBRE = [
+ENTRADAS_COBRE = (
     "config.json",
     "initial_conditions.json",
     "penalties.json",
@@ -66,37 +71,50 @@ ARQUIVOS_COBRE = [
     "system/hydro_production_models.json",
     "scenarios/inflow_seasonal_stats.parquet",
     "scenarios/load_seasonal_stats.parquet",
-]
+)
 
 
 def pasta_caso():
-    for pasta in (RAIZ, RAIZ / "1dtoy"):
-        if (pasta / "stages.json").is_file():
-            return pasta
+    if (RAIZ / "stages.json").is_file():
+        return RAIZ
+    if (RAIZ / "1dtoy" / "stages.json").is_file():
+        return RAIZ / "1dtoy"
     return RAIZ
 
 
-def localizar(pasta, relativo):
-    caminho = pasta / relativo
-    if caminho.is_file():
-        return caminho
-    caminho = pasta / Path(relativo).name
-    return caminho if caminho.is_file() else None
+def objeto(valor):
+    return valor if isinstance(valor, dict) else {}
 
 
-def ler_json(origem):
-    dados = json.loads(origem.read().decode("utf-8-sig"))
+def ler_json(conteudo, rotulo):
+    try:
+        dados = json.loads(conteudo.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as erro:
+        raise ValueError(f"{rotulo}: o arquivo não é um JSON válido.") from erro
     if not isinstance(dados, dict):
-        raise ValueError("O arquivo JSON deve conter um objeto.")
+        raise ValueError(f"{rotulo}: era esperado um objeto JSON.")
     return dados
 
 
-def json_local(caminho):
-    with caminho.open("rb") as arquivo:
-        return ler_json(arquivo)
+def inteiro(valor):
+    return valor if type(valor) is int and valor >= 0 else None
 
 
-def exibir_grafico(fig):
+def segundos(valor):
+    if type(valor) in (int, float) and math.isfinite(valor) and valor >= 0:
+        return float(valor)
+    return None
+
+
+def formatar(valor):
+    if valor is None:
+        return "Não informado"
+    if isinstance(valor, float):
+        return f"{valor:,.3f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return str(valor)
+
+
+def grafico(fig):
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor="#ffffff",
@@ -104,97 +122,181 @@ def exibir_grafico(fig):
         font=dict(color="#000000"),
         hoverlabel=dict(bgcolor="#ffffff", font_color="#000000"),
         legend_title_text="",
-        margin=dict(l=25, r=25, t=55, b=35),
+        margin=dict(l=20, r=20, t=55, b=35),
     )
-    fig.update_xaxes(tickfont=dict(color="#000000"))
-    fig.update_yaxes(tickfont=dict(color="#000000"))
     st.plotly_chart(fig, theme=None, use_container_width=True)
 
 
-def imprimir_valor(valor):
-    if valor is None:
-        return "Não disponível"
-    if isinstance(valor, float):
-        return f"{valor:,.3f}".replace(",", "_").replace(".", ",").replace("_", ".")
-    return str(valor)
+def ler_parquet(opcional, nome, colunas, avisos):
+    if opcional is None:
+        return pd.DataFrame()
+    try:
+        dados = pd.read_parquet(io.BytesIO(opcional), engine="pyarrow")
+    except Exception as erro:
+        avisos.append(f"{nome} não pôde ser lido: {erro}")
+        return pd.DataFrame()
+
+    faltam = set(colunas) - set(dados.columns)
+    if faltam:
+        avisos.append(f"{nome} não tem as colunas: {', '.join(sorted(faltam))}.")
+        return pd.DataFrame()
+
+    return dados
 
 
-def resumo_cobre(treino, simulacao=None):
-    if treino.get("software") != "cobre":
-        raise ValueError("Selecione o training/metadata.json de uma execução do Cobre.")
-    if (
-        treino.get("status") != "complete"
-        or treino.get("convergence", {}).get("termination_reason") == "error"
-    ):
-        raise ValueError("O treinamento do Cobre não foi concluído com sucesso.")
+def resumo_cobre(treino, simulacao, conv, custos, origem, avisos):
+    convergencia = objeto(treino.get("convergence"))
+    status_treino = str(treino.get("status", "")).strip().lower()
+    status_sim = str(simulacao.get("status", "")).strip().lower()
+    motivo = str(convergencia.get("termination_reason", "")).strip().lower()
 
-    simulacao = simulacao or {}
-    if simulacao and "scenarios" not in simulacao:
-        raise ValueError("O segundo JSON deve ser o simulation/metadata.json.")
+    if motivo == "error" or status_treino in {"error", "failed"}:
+        raise ValueError("O JSON informa que o treinamento terminou com erro.")
+    if status_treino == "partial":
+        avisos.append("O treinamento foi marcado como parcial.")
+    if status_sim in {"partial", "error", "failed"}:
+        avisos.append(f"A simulação foi marcada como '{status_sim}'.")
 
-    iteracoes = treino.get("iterations", {}).get("completed")
-    forward = treino.get("configuration", {}).get("forward_passes")
-    cenarios = simulacao.get("scenarios", {})
+    # Identifica o treinamento pelos dados, sem exigir software == "cobre".
+    n_iter = inteiro(objeto(treino.get("iterations")).get("completed"))
+    n_iter_parquet = None
+    if not conv.empty:
+        n_iter_parquet = int(conv["iteration"].dropna().nunique())
+
+    if n_iter is None:
+        tem_indicio_treino = any(
+            chave in treino
+            for chave in ("iterations", "convergence", "bounds", "solve_stats", "configuration")
+        )
+        if not tem_indicio_treino or not n_iter_parquet:
+            campos = ", ".join(sorted(treino)) or "(nenhum)"
+            raise ValueError(
+                "O primeiro JSON não pôde ser identificado como resultado de "
+                "treinamento. Confira se ele veio de training/metadata.json. "
+                f"Campos encontrados: {campos}."
+            )
+        n_iter = n_iter_parquet
+        avisos.append("Iterações contadas no arquivo convergence.parquet.")
+    elif n_iter_parquet is not None and n_iter != n_iter_parquet:
+        avisos.append(
+            "A contagem de iterações do JSON difere da do Parquet. "
+            "Confira se ambos vieram da mesma rodada."
+        )
+
+    cenarios = objeto(simulacao.get("scenarios"))
+    if not cenarios and custos.empty:
+        campos = ", ".join(sorted(simulacao)) or "(nenhum)"
+        raise ValueError(
+            "O segundo JSON não contém o bloco scenarios e não há um "
+            "scenario_summary.parquet válido para complementar a leitura. "
+            "Confira se o JSON veio de simulation/metadata.json. "
+            f"Campos encontrados: {campos}."
+        )
+
+    n_sim = inteiro(cenarios.get("completed"))
+    n_sim_parquet = None
+    if not custos.empty:
+        n_sim_parquet = int(custos["scenario_id"].dropna().nunique())
+
+    fonte_sim = "simulation/metadata.json"
+    if n_sim is None and n_sim_parquet is not None:
+        n_sim = n_sim_parquet
+        fonte_sim = "cenários presentes em scenario_summary.parquet"
+        avisos.append(
+            "A quantidade de simulações mostra os cenários presentes no Parquet, "
+            "pois o JSON não informa a contagem de concluídas."
+        )
+    elif n_sim is not None and n_sim_parquet is not None and n_sim != n_sim_parquet:
+        avisos.append(
+            "O número de simulações no JSON difere do número de cenários no Parquet. "
+            "Confira se ambos vieram da mesma rodada."
+        )
+
+    forward = inteiro(objeto(treino.get("configuration")).get("forward_passes"))
+
     return {
+        "origem": origem,
+        "software": treino.get("software"),
         "versao": treino.get("software_version"),
-        "tempo_treino_s": treino.get("duration_seconds"),
-        "n_iter": iteracoes,
+        "status_treino": status_treino,
+        "status_sim": status_sim,
+        "tempo_treino_s": segundos(treino.get("duration_seconds")),
+        "tempo_simulacao_s": segundos(simulacao.get("duration_seconds")),
+        "n_iter": n_iter,
         "n_forward": forward,
-        "n_trajetorias_treino": (
-            iteracoes * forward
-            if isinstance(iteracoes, int) and isinstance(forward, int)
-            else None
-        ),
-        "n_sim": cenarios.get("completed"),
-        "n_sim_solicitadas": cenarios.get("requested"),
-        "n_sim_falhas": cenarios.get("failed"),
-        "n_pl_treino": treino.get("solve_stats", {}).get("total_lp_solves"),
+        "n_trajetorias_treino": n_iter * forward if forward is not None else None,
+        "n_sim": n_sim,
+        "fonte_sim": fonte_sim if n_sim is not None else None,
+        "n_sim_falhas": inteiro(cenarios.get("failed")),
+        "n_pl_treino": inteiro(objeto(treino.get("solve_stats")).get("total_lp_solves")),
+        "convergencia": conv,
+        "custos": custos,
+        "avisos": avisos,
     }
 
 
+def importar_cobre(treino_bytes, sim_bytes, conv_bytes, custos_bytes, origem):
+    treino = ler_json(treino_bytes, "training/metadata.json")
+    simulacao = ler_json(sim_bytes, "simulation/metadata.json")
+    avisos = []
+    conv = ler_parquet(
+        conv_bytes, "convergence.parquet", ("iteration", "lower_bound"), avisos
+    )
+    custos = ler_parquet(
+        custos_bytes,
+        "scenario_summary.parquet",
+        ("scenario_id", "discounted_immediate_cost"),
+        avisos,
+    )
+    return resumo_cobre(treino, simulacao, conv, custos, origem, avisos)
+
+
 def rodar_cobre(n_iter, n_forward, n_sim, seed, n_aberturas):
-    """Executa o binário oficial em uma cópia temporária do caso."""
-    with TemporaryDirectory(prefix="1dtoy_") as pasta_tmp:
-        base = Path(pasta_tmp)
-        destino = base / "caso"
-        saida = base / "resultados"
+    if COBRE is None:
+        raise RuntimeError("O executável cobre não está disponível neste servidor.")
+
+    with TemporaryDirectory(prefix="cobre_1dtoy_") as tmp:
+        caso_tmp = Path(tmp) / "caso"
+        saida = Path(tmp) / "resultados"
         origem = pasta_caso()
 
-        for relativo in ARQUIVOS_COBRE:
-            arquivo = localizar(origem, relativo)
-            if arquivo is None:
-                raise FileNotFoundError(f"Arquivo necessário para o Cobre: {relativo}")
-            alvo = destino / relativo
-            alvo.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(arquivo, alvo)
+        for relativo in ENTRADAS_COBRE:
+            fonte = origem / relativo
+            if not fonte.is_file():
+                fonte = origem / Path(relativo).name
+            if not fonte.is_file():
+                raise FileNotFoundError(
+                    f"Para executar o COBRE neste servidor, falta {relativo}. "
+                    "Para apenas importar resultados, esse arquivo não é necessário."
+                )
 
-        cfg = json_local(destino / "config.json")
-        treino = cfg["training"]
-        if treino.get("selection", {}).get("method") != "sampled":
-            raise ValueError("Para esta comparação, configure o treinamento como sampled.")
-        treino["selection"]["forward_passes"] = n_forward
+            destino = caso_tmp / relativo
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(fonte, destino)
+
+        config_path = caso_tmp / "config.json"
+        config = ler_json(config_path.read_bytes(), "config.json")
+        treino = config.setdefault("training", {})
+        selecao = treino.setdefault("selection", {})
+        if selecao.get("method") != "sampled":
+            raise ValueError("O caso deve estar configurado com treinamento sampled.")
+        selecao["forward_passes"] = n_forward
         treino["stopping_rules"] = [{"type": "iteration_limit", "limit": n_iter}]
         treino.setdefault("scenario_source", {})["seed"] = seed
-
-        sim = cfg.setdefault("simulation", {})
+        sim = config.setdefault("simulation", {})
         sim["enabled"] = True
         sim["selection"] = {"method": "sampled", "num_scenarios": n_sim}
-
-        caminho_cfg = destino / "config.json"
-        caminho_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
         if n_aberturas is not None:
-            caminho_etapas = destino / "stages.json"
-            etapas = json_local(caminho_etapas)
-            for etapa in etapas["stages"]:
+            stages_path = caso_tmp / "stages.json"
+            stages = ler_json(stages_path.read_bytes(), "stages.json")
+            for etapa in stages["stages"]:
                 etapa["num_openings"] = n_aberturas
-            caminho_etapas.write_text(json.dumps(etapas, indent=2), encoding="utf-8")
+            stages_path.write_text(json.dumps(stages, indent=2), encoding="utf-8")
 
         processo = subprocess.run(
-            [
-                COBRE, "run", str(destino), "--output", str(saida),
-                "--threads", "1", "--comm-backend", "local",
-            ],
+            [COBRE, "run", str(caso_tmp), "--output", str(saida)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -204,27 +306,24 @@ def rodar_cobre(n_iter, n_forward, n_sim, seed, n_aberturas):
         )
         if processo.returncode != 0:
             detalhe = (processo.stderr or processo.stdout).strip()
-            raise RuntimeError(detalhe[-2500:] or "O Cobre terminou com erro.")
+            raise RuntimeError(detalhe[-2500:] or "O COBRE terminou com erro.")
 
-        meta_t = json_local(saida / "training" / "metadata.json")
-        meta_s = json_local(saida / "simulation" / "metadata.json")
-        resultado = resumo_cobre(meta_t, meta_s)
-        for chave, relativo in {
-            "convergencia": "training/convergence.parquet",
-            "custos": "simulation/scenario_summary.parquet",
-        }.items():
-            caminho = saida / relativo
-            if caminho.is_file():
-                resultado[chave] = pd.read_parquet(caminho)
-        resultado["origem"] = "Executado no servidor deste painel"
-        return resultado
+        def opcional(nome):
+            arquivo = saida / nome
+            return arquivo.read_bytes() if arquivo.is_file() else None
+
+        return importar_cobre(
+            (saida / "training/metadata.json").read_bytes(),
+            (saida / "simulation/metadata.json").read_bytes(),
+            opcional("training/convergence.parquet"),
+            opcional("simulation/scenario_summary.parquet"),
+            "Executado no servidor do painel",
+        )
 
 
 st.title("1dtoy | Comparação de PDDE")
 st.caption("Despacho hidrotérmico com uma UHE, duas UTEs e uma barra.")
 
-# O import fica protegido para a aba Cobre continuar disponível
-# mesmo se houver erro de sintaxe ou dependência no modelo.py.
 try:
     from modelo import carregar_1dtoy, executar_pdde
 
@@ -236,190 +335,210 @@ except Exception as erro:
 
 with st.sidebar:
     st.header("Parâmetros do estudo")
+
     with st.form("parametros"):
-        n_iter = int(st.number_input(
+        n_iter = st.number_input(
             "Iterações de treinamento", min_value=1,
             value=int(caso.get("n_iter", 128)), step=1,
-        ))
-        n_forward = int(st.number_input(
+        )
+        n_forward = st.number_input(
             "Trajetórias forward por iteração", min_value=1,
             value=int(caso.get("n_forward", 1)), step=1,
-        ))
-        n_sim = int(st.number_input(
+        )
+        n_sim = st.number_input(
             "Simulações finais", min_value=1,
             value=int(caso.get("n_sim", 100)), step=1,
-        ))
-        seed = int(st.number_input(
+        )
+        seed = st.number_input(
             "Semente", min_value=0, value=int(caso.get("seed", 42)), step=1,
-        ))
+        )
         manter_aberturas = st.checkbox("Usar aberturas do stages.json", value=True)
-        aberturas = int(st.number_input(
+        aberturas = st.number_input(
             "Aberturas por estágio, se substituir", min_value=1, value=10, step=1
-        ))
+        )
         executar_ufjf = st.form_submit_button("Executar PDDE UFJF")
         executar_oficial = st.form_submit_button(
-            "Executar Cobre oficial", disabled=COBRE is None
+            "Executar COBRE oficial", disabled=COBRE is None
         )
 
-    st.caption("As entradas só são aplicadas ao clicar em um botão de execução.")
+    st.caption("Esses parâmetros não alteram os resultados importados do COBRE.")
 
-n_aberturas = None if manter_aberturas else aberturas
+n_aberturas = None if manter_aberturas else int(aberturas)
 
-if executar_ufjf:
-    if erro_ufjf is None:
-        try:
-            with st.spinner("Treinando a política e simulando o 1dtoy..."):
-                st.session_state["ufjf_resultado"] = executar_pdde(
-                    pasta_caso(), n_iter=n_iter, n_forward=n_forward, n_sim=n_sim,
-                    seed=seed, n_aberturas=n_aberturas,
-                )
-        except Exception as erro:
-            st.error(f"Não foi possível executar a PDDE UFJF: {erro}")
+if executar_ufjf and erro_ufjf is None:
+    try:
+        with st.spinner("Treinando a política e simulando o 1dtoy..."):
+            st.session_state["ufjf_resultado"] = executar_pdde(
+                pasta_caso(),
+                n_iter=int(n_iter),
+                n_forward=int(n_forward),
+                n_sim=int(n_sim),
+                seed=int(seed),
+                n_aberturas=n_aberturas,
+            )
+    except Exception as erro:
+        st.session_state.pop("ufjf_resultado", None)
+        st.error(f"Não foi possível executar a PDDE UFJF: {erro}")
 
 if executar_oficial:
     try:
-        with st.spinner("Executando o Cobre oficial..."):
+        with st.spinner("Executando o COBRE oficial..."):
             st.session_state["cobre_resultado"] = rodar_cobre(
-                n_iter, n_forward, n_sim, seed, n_aberturas
+                int(n_iter), int(n_forward), int(n_sim), int(seed), n_aberturas
             )
     except subprocess.TimeoutExpired:
-        st.error("O Cobre excedeu o tempo limite. Reduza o tamanho do estudo.")
+        st.session_state.pop("cobre_resultado", None)
+        st.error("O COBRE excedeu o tempo limite desta execução.")
     except Exception as erro:
-        st.error(f"Não foi possível executar o Cobre: {erro}")
+        st.session_state.pop("cobre_resultado", None)
+        st.error(f"Não foi possível executar o COBRE: {erro}")
 
-aba_ufjf, aba_cobre, aba_comparacao = st.tabs(
-    ["1dtoy | PDDE UFJF", "1dtoy | PDDE Cobre", "Comparação"]
+aba_ufjf, aba_cobre, aba_comp = st.tabs(
+    ["1dtoy | PDDE UFJF", "1dtoy | PDDE COBRE", "Comparação"]
 )
 
 with aba_ufjf:
     st.subheader("PDDE UFJF")
     st.caption("Aberturas fixas no treinamento, forward amostrado e cortes no backward.")
+    ufjf = st.session_state.get("ufjf_resultado")
 
     if erro_ufjf is not None:
         st.error(f"Não foi possível carregar o modelo.py ou os dados do 1dtoy: {erro_ufjf}")
-
-    ufjf = st.session_state.get("ufjf_resultado")
-    if ufjf is None:
-        st.info("Selecione os parâmetros e clique em Executar PDDE UFJF.")
+    elif ufjf is None:
+        st.info("Clique em Executar PDDE UFJF na barra lateral.")
     else:
         a, b, c, d = st.columns(4)
-        a.metric("Treinamento (s)", imprimir_valor(ufjf["tempo_treino_s"]))
-        b.metric("Simulação (s)", imprimir_valor(ufjf["tempo_simulacao_s"]))
-        c.metric("Trajetórias de treinamento", ufjf["n_trajetorias_treino"])
+        a.metric("Treinamento (s)", formatar(ufjf["tempo_treino_s"]))
+        b.metric("Simulação (s)", formatar(ufjf["tempo_simulacao_s"]))
+        c.metric("Trajetórias no treino", ufjf["n_trajetorias_treino"])
         d.metric("Simulações finais", ufjf["n_sim"])
 
         conv = ufjf["convergencia"].rename(columns={
             "limite_inferior": "Limite inferior",
             "custo_forward_medio": "Custo médio forward",
         })
-        exibir_grafico(px.line(
+        grafico(px.line(
             conv, x="iteracao", y=["Limite inferior", "Custo médio forward"],
             title="Evolução do treinamento",
             labels={"iteracao": "Iteração", "value": "Custo descontado"},
             color_discrete_sequence=CORES,
         ))
-        st.caption("O custo médio forward é uma estimativa amostral, não um limite superior exato.")
+        st.caption("O custo médio forward é amostral, não um limite superior exato.")
 
-        sim_df = ufjf["simulacao"]
-        campos = {
+        dados = ufjf["simulacao"]
+        fontes = {
             "geracao_hidro_mw": "UHE",
             "ute1_mw": "UTE 1",
             "ute2_mw": "UTE 2",
             "deficit_mw": "Déficit",
         }
-        medias = sim_df.groupby("data", as_index=False)[
-            ["volume_final_hm3", *campos]
+        medias = dados.groupby("data", as_index=False)[
+            ["volume_final_hm3", *fontes]
         ].mean()
+
         esquerda, direita = st.columns(2)
         with esquerda:
-            exibir_grafico(px.line(
+            grafico(px.line(
                 medias, x="data", y="volume_final_hm3", markers=True,
                 title="Volume final médio por estágio",
                 labels={"data": "Estágio", "volume_final_hm3": "Volume (hm³)"},
                 color_discrete_sequence=CORES,
             ))
         with direita:
-            exibir_grafico(px.bar(
-                medias.rename(columns=campos), x="data", y=list(campos.values()),
+            grafico(px.bar(
+                medias.rename(columns=fontes), x="data", y=list(fontes.values()),
                 title="Despacho médio e déficit", barmode="stack",
                 labels={"data": "Estágio", "value": "Potência (MW)"},
                 color_discrete_sequence=CORES,
             ))
 
-        with st.expander("Aberturas utilizadas no treinamento"):
+        with st.expander("Aberturas de treinamento"):
             st.dataframe(ufjf["aberturas"], hide_index=True, use_container_width=True)
         with st.expander("Resultados médios por estágio"):
             st.dataframe(medias.round(3), hide_index=True, use_container_width=True)
+
         st.download_button(
             "Baixar simulações UFJF em CSV",
-            data=sim_df.to_csv(index=False).encode("utf-8-sig"),
+            data=dados.to_csv(index=False).encode("utf-8-sig"),
             file_name="1dtoy_simulacoes_ufjf.csv",
             mime="text/csv",
         )
 
 with aba_cobre:
-    st.subheader("Cobre | Execução oficial")
-    if COBRE is None:
-        st.info(
-            "O executável cobre não está instalado neste servidor. "
-            "Você pode importar os arquivos de uma execução real abaixo."
-        )
-    else:
-        st.caption(
-            "Para executar aqui, coloque os Parquet originais de entrada no GitHub "
-            "em scenarios/. Os CSVs continuam disponíveis para o modelo UFJF."
-        )
+    st.subheader("Resultados do COBRE")
+    st.caption(
+        "Use arquivos da mesma rodada. A importação não depende do executável COBRE."
+    )
 
-    with st.expander("Importar resultados de uma execução oficial"):
+    with st.expander("Importar resultados de uma execução", expanded=True):
         with st.form("importar_cobre"):
-            arq_t = st.file_uploader("Do Cobre: training/metadata.json", type=["json"])
-            arq_s = st.file_uploader("Do Cobre: simulation/metadata.json", type=["json"])
+            arq_t = st.file_uploader(
+                "training/metadata.json", type=["json"], key="meta_treino"
+            )
+            arq_s = st.file_uploader(
+                "simulation/metadata.json", type=["json"], key="meta_sim"
+            )
             arq_c = st.file_uploader(
-                "Opcional: training/convergence.parquet", type=["parquet"]
+                "Opcional: training/convergence.parquet",
+                type=["parquet"], key="convergencia_cobre",
             )
             arq_r = st.file_uploader(
-                "Opcional: simulation/scenario_summary.parquet", type=["parquet"]
+                "Opcional: simulation/scenario_summary.parquet",
+                type=["parquet"], key="resumo_cenarios",
             )
-            importar = st.form_submit_button("Carregar resultados do Cobre")
+            importar = st.form_submit_button("Carregar resultados do COBRE")
 
         if importar:
             try:
                 if arq_t is None or arq_s is None:
-                    raise ValueError("Selecione os dois arquivos metadata.json.")
-                r = resumo_cobre(ler_json(arq_t), ler_json(arq_s))
-                if arq_c is not None:
-                    r["convergencia"] = pd.read_parquet(arq_c)
-                if arq_r is not None:
-                    r["custos"] = pd.read_parquet(arq_r)
-                r["origem"] = "Arquivos importados de uma execução externa"
-                st.session_state["cobre_resultado"] = r
+                    raise ValueError(
+                        "Selecione os dois metadata.json, um da pasta training "
+                        "e outro da pasta simulation."
+                    )
+                st.session_state["cobre_resultado"] = importar_cobre(
+                    arq_t.getvalue(),
+                    arq_s.getvalue(),
+                    arq_c.getvalue() if arq_c is not None else None,
+                    arq_r.getvalue() if arq_r is not None else None,
+                    "Arquivos importados de uma execução externa",
+                )
+                st.success("Resultados do COBRE carregados.")
             except Exception as erro:
+                st.session_state.pop("cobre_resultado", None)
                 st.error(f"Não foi possível importar os resultados: {erro}")
 
     cobre = st.session_state.get("cobre_resultado")
     if cobre is not None:
         st.caption(f"{cobre['origem']} | Versão: {cobre['versao'] or 'não informada'}")
-        a, b, c = st.columns(3)
-        a.metric("Treinamento (s)", imprimir_valor(cobre["tempo_treino_s"]))
-        b.metric("Iterações concluídas", imprimir_valor(cobre["n_iter"]))
-        c.metric("Simulações concluídas", imprimir_valor(cobre["n_sim"]))
+        if cobre["software"]:
+            st.caption(f"Software informado no arquivo: {cobre['software']}.")
+        for aviso in cobre["avisos"]:
+            st.warning(aviso)
         if cobre["n_sim_falhas"]:
             st.warning(f"Simulações com falha: {cobre['n_sim_falhas']}.")
 
-        convergencia = cobre.get("convergencia", pd.DataFrame())
-        if {"iteration", "lower_bound"}.issubset(convergencia.columns):
-            exibir_grafico(px.line(
-                convergencia, x="iteration", y="lower_bound",
-                title="Limite inferior do Cobre por iteração",
+        a, b, c, d = st.columns(4)
+        a.metric("Treinamento (s)", formatar(cobre["tempo_treino_s"]))
+        b.metric("Simulação (s)", formatar(cobre["tempo_simulacao_s"]))
+        c.metric("Iterações registradas", formatar(cobre["n_iter"]))
+        d.metric("Simulações registradas", formatar(cobre["n_sim"]))
+        if cobre["fonte_sim"]:
+            st.caption(f"Fonte da contagem de simulações: {cobre['fonte_sim']}.")
+
+        conv = cobre["convergencia"]
+        if not conv.empty:
+            grafico(px.line(
+                conv.sort_values("iteration"), x="iteration", y="lower_bound",
+                title="Limite inferior do COBRE por iteração",
                 labels={"iteration": "Iteração", "lower_bound": "Limite inferior"},
                 color_discrete_sequence=CORES,
             ))
 
-        custos = cobre.get("custos", pd.DataFrame())
-        if {"scenario_id", "discounted_immediate_cost"}.issubset(custos.columns):
-            exibir_grafico(px.scatter(
+        custos = cobre["custos"]
+        if not custos.empty:
+            grafico(px.scatter(
                 custos, x="scenario_id", y="discounted_immediate_cost",
-                title="Custo descontado por cenário simulado",
+                title="Custo descontado por cenário",
                 labels={
                     "scenario_id": "Cenário",
                     "discounted_immediate_cost": "Custo descontado (USD)",
@@ -427,49 +546,51 @@ with aba_cobre:
                 color_discrete_sequence=CORES,
             ))
 
-with aba_comparacao:
+with aba_comp:
     st.subheader("Comparação das últimas execuções")
     ufjf = st.session_state.get("ufjf_resultado")
     cobre = st.session_state.get("cobre_resultado")
 
     if ufjf is None or cobre is None:
-        st.info("Execute a PDDE UFJF e execute ou importe os resultados do Cobre.")
+        st.info("Execute a PDDE UFJF e carregue os resultados do COBRE.")
     else:
         linhas = []
         for rotulo, chave in [
             ("Treinamento (s)", "tempo_treino_s"),
-            ("Iterações concluídas", "n_iter"),
+            ("Simulação (s)", "tempo_simulacao_s"),
+            ("Iterações registradas", "n_iter"),
             ("Trajetórias forward por iteração", "n_forward"),
-            ("Trajetórias de treinamento", "n_trajetorias_treino"),
-            ("Simulações finais concluídas", "n_sim"),
+            ("Trajetórias no treinamento", "n_trajetorias_treino"),
+            ("Simulações finais registradas", "n_sim"),
             ("PLs resolvidos no treinamento", "n_pl_treino"),
         ]:
-            u, c = ufjf.get(chave), cobre.get(chave)
-            delta = c - u if c is not None and u is not None else None
+            u = ufjf.get(chave)
+            c = cobre.get(chave)
+            diff = c - u if c is not None and u is not None else None
             linhas.append({
                 "Indicador": rotulo,
-                "PDDE UFJF": imprimir_valor(u),
-                "Cobre oficial": imprimir_valor(c),
-                    "Diferença (Cobre − UFJF)": imprimir_valor(delta),
+                "PDDE UFJF": formatar(u),
+                "COBRE": formatar(c),
+                "Diferença (COBRE menos UFJF)": formatar(diff),
             })
 
         st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
-        st.caption(f"Origem do resultado Cobre: {cobre['origem']}.")
+        st.caption(f"Origem do resultado COBRE: {cobre['origem']}.")
+        if cobre["status_treino"] == "partial" or cobre["status_sim"] in {
+            "partial", "error", "failed"
+        }:
+            st.warning("A rodada do COBRE não está completa. Leia as diferenças com cautela.")
 
     st.markdown(
         """
-        **PDDE UFJF:** implementação didática em Python/SciPy. Sorteia aberturas
-        independentes por estágio, fixa essas aberturas durante o treinamento
-        e constrói cortes da função de custo futuro no backward.
+        **PDDE UFJF:** implementação didática em Python/SciPy, com aberturas
+        fixas no treinamento e cortes de custo futuro no backward.
 
-        **Cobre:** execução oficial em Rust. Usa a configuração de cenários,
-        treinamento e simulação do caso. A mesma semente não garante as
-        mesmas trajetórias nos dois programas.
+        **COBRE:** usa os resultados da execução real. A mesma semente não
+        garante que os dois programas usem as mesmas trajetórias.
 
-        **Como ler a diferença de tempo:** a tabela compara apenas o tempo
-        registrado para treinamento, não o tempo total da interface.
-        Se as execuções vieram de máquinas diferentes, ou se o esforço
-        computacional e os cenários não foram equivalentes, a diferença
-        é descritiva e não demonstra ganho de desempenho.
+        **Diferença de tempo:** valores de ambientes, configurações ou amostras
+        diferentes são descritivos. A diferença não comprova ganho de desempenho.
+        Um tempo ausente não é tratado como zero.
         """
     )
